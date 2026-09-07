@@ -1,0 +1,47 @@
+services:
+  api:
+    build:
+      context: .
+      args:
+        INSTALL_MODELS: "true"
+    image: wiki-hami-extraction:0.2.0
+    env_file:
+      - .env
+    environment:
+      HF_HOME: /app/.cache/huggingface
+      PADDLE_HOME: /app/.cache/paddle
+      PADDLE_PDX_CACHE_HOME: /app/.cache/paddlex
+      PADDLE_PDX_MODEL_SOURCE: HUGGINGFACE
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - wiki_hami_model_cache:/app/.cache
+      - ./data/outputs:/app/data/outputs
+    shm_size: "2gb"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  ui:
+    image: wiki-hami-extraction:0.2.0
+    env_file:
+      - .env
+    environment:
+      WIKI_HAMI_API_BASE: http://api:8000/api/v1
+    command: streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port 8501
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+
+volumes:
+  wiki_hami_model_cache:
