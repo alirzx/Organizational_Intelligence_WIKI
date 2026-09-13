@@ -17,12 +17,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-models.txt requirements-paddle-cpu.txt ./
+COPY requirements.txt requirements-models.txt requirements-paddle-cpu.txt requirements-torch-cpu.txt ./
 
 ARG INSTALL_MODELS=true
 RUN python -m pip install --upgrade pip && \
     if [ "$INSTALL_MODELS" = "true" ]; then \
-      python -m pip install -r requirements-paddle-cpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
+      python -m pip install -r requirements-paddle-cpu.txt \
+        -i https://www.paddlepaddle.org.cn/packages/stable/cpu/ && \
+      python -m pip install -r requirements-torch-cpu.txt \
+        --index-url https://download.pytorch.org/whl/cpu && \
       python -m pip install -r requirements-models.txt; \
     else \
       python -m pip install -r requirements.txt; \
