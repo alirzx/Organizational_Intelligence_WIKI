@@ -42,6 +42,7 @@ The RF-DETR checkpoint also predicts checked/unchecked checkboxes; V1 filters th
 ## Repository structure
 
 ```text
+run.py               Unified local API/Streamlit launcher
 app/api/             FastAPI routes and multipart parsing
 app/core/            settings and process-local service registry
 app/preprocessing/   validation, image normalization, geometry transforms
@@ -71,14 +72,19 @@ Requirements are split by purpose:
 
 - `requirements.txt`: FastAPI, image processing, Streamlit/client runtime;
 - `requirements-dev.txt`: base dependencies plus tests;
-- `requirements-models.txt`: PaddleOCR, RF-DETR, and Hugging Face adapters; PaddlePaddle itself is platform-specific;
-- `requirements-paddle-cpu.txt`: tested CPU PaddlePaddle version.
+- `requirements-models.txt`: PaddleOCR, RF-DETR, and Hugging Face adapters;
+- `requirements-paddle-cpu.txt`: tested CPU PaddlePaddle version;
+- `requirements-torch-cpu.txt`: tested CPU PyTorch/TorchVision versions used by RF-DETR.
 
-Install real CPU model runtimes with:
+Install real CPU model runtimes in this order so dependency resolution does not replace CPU PyTorch with CUDA wheels:
 
 ```bash
 python -m pip install -r requirements-paddle-cpu.txt \
   -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+
+python -m pip install -r requirements-torch-cpu.txt \
+  --index-url https://download.pytorch.org/whl/cpu
+
 python -m pip install -r requirements-models.txt
 ```
 
@@ -90,30 +96,57 @@ For real inference set:
 
 ```text
 WIKI_HAMI_OCR_BACKEND=paddle
+WIKI_HAMI_OCR_DEVICE=cpu
 WIKI_HAMI_FIGURE_TABLE_BACKEND=pp_doclayout
+WIKI_HAMI_FIGURE_TABLE_DEVICE=cpu
 WIKI_HAMI_STAMP_SIGNATURE_BACKEND=rfdetr
+WIKI_HAMI_STAMP_SIGNATURE_DEVICE=cpu
 ```
 
 Mocks exercise the canonical pipeline but do not represent model quality.
 
-## Run FastAPI
+## Run locally
+
+Activate the project environment first:
 
 ```bash
 source .venv/bin/activate
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+Run the FastAPI service in one terminal:
+
+```bash
+python run.py --api
+```
+
+For development auto-reload:
+
+```bash
+python run.py --api --reload
+```
+
+Defaults:
 
 - API root: `http://localhost:8000`
 - OpenAPI: `http://localhost:8000/docs`
 - health: `http://localhost:8000/api/v1/health`
 
-## Run Streamlit
-
-Keep FastAPI running, then in another terminal:
+Keep the API running, then start the Streamlit inspector in another terminal:
 
 ```bash
 source .venv/bin/activate
-streamlit run ui/streamlit_app.py --server.port 8501
+python run.py --web
+```
+
+Default Streamlit URL: `http://localhost:8501`.
+
+`run.py` launches both services through the active Python interpreter, changes execution to the repository root, and ensures the repository is on `PYTHONPATH`. This prevents package-import failures such as `No module named 'ui'` when starting Streamlit.
+
+Optional overrides are available for both services:
+
+```bash
+python run.py --api --host 0.0.0.0 --port 8000
+python run.py --web --host 0.0.0.0 --port 8501
 ```
 
 The inspector uploads one or many pages to `/extract`, shows document/page status and latency, original and annotated pages, a fixed class legend, OCR paragraphs, page/transform metadata, and canonical JSON. It can download complete JSON or a ZIP containing JSON, a manifest, and all annotated PNGs. Annotations use canonical source coordinates and EXIF-corrected images.
@@ -137,7 +170,7 @@ docker compose up -d --build
 - FastAPI: `http://localhost:8000`
 - Streamlit: `http://localhost:8501`
 
-The default Docker build installs real CPU model dependencies. The configured `.env` still selects mock or real backends. Local Compose uses one named persistent cache volume and one API worker to avoid duplicating model memory.
+The default Docker build installs explicit CPU PaddlePaddle and CPU PyTorch/TorchVision before the model extras. The configured `.env` still selects mock or real backends. Local Compose uses one named persistent cache volume and one API worker to avoid duplicating model memory.
 
 ## Tests
 
