@@ -26,6 +26,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    networks:
+      - wikio
 
   ui:
     image: wiki-hami-extraction:0.2.0
@@ -42,6 +44,13 @@ services:
     restart: unless-stopped
     healthcheck:
       disable: true
+    networks:
+      - wikio
 
 volumes:
   wiki_hami_model_cache:
+
+networks:
+  wikio:
+    external: true
+    name: wikio
