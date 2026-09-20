@@ -1,123 +1,131 @@
 # Extraction V1 deployment
 
-## Local Python 3.11
+## Runtime topology
+
+The normal deployment remains one FastAPI process plus optional Streamlit. MinIO is an external S3 dependency; Wiki Hami does not require MinIO to run in the same Compose project.
+
+```text
+Product backend -> Wiki Hami API -> MinIO/S3
+                           |
+                    three CPU models
+```
+
+Keep one Uvicorn worker while all models are process-local. Every additional process loads another OCR, layout and RF-DETR model set.
+
+## Local Python
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
 cp .env.example .env
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+python run.py --api
 ```
 
-In a second terminal:
+Second terminal:
 
 ```bash
 source .venv/bin/activate
-streamlit run ui/streamlit_app.py --server.port 8501
+python run.py --web
 ```
 
-The UI expects `WIKI_HAMI_API_BASE=http://localhost:8000/api/v1` unless overridden. It has no embedded model logic, so FastAPI must be available.
+The base requirements now include the official `minio` Python SDK.
 
 ## Real CPU model dependencies
 
-Base `requirements.txt` includes API/UI dependencies only. `requirements-dev.txt` adds tests. For all real models on CPU:
+Install in this order:
 
 ```bash
-source .venv/bin/activate
 python -m pip install -r requirements-paddle-cpu.txt \
   -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+python -m pip install -r requirements-torch-cpu.txt \
+  --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -r requirements-models.txt
 ```
 
-Then set:
+Select:
 
-```text
+```env
 WIKI_HAMI_OCR_BACKEND=paddle
+WIKI_HAMI_OCR_DEVICE=cpu
 WIKI_HAMI_FIGURE_TABLE_BACKEND=pp_doclayout
+WIKI_HAMI_FIGURE_TABLE_DEVICE=cpu
 WIKI_HAMI_STAMP_SIGNATURE_BACKEND=rfdetr
+WIKI_HAMI_STAMP_SIGNATURE_DEVICE=cpu
 ```
 
-CPU remains valid even if Torch is CUDA-capable. To select another device, change the module-specific `*_DEVICE` setting only after validating that the installed framework/runtime supports it.
+## MinIO configuration
 
-## Cache paths
+Example when MinIO listens on `9000` inside its Docker network but is published to clients as host port `9002`:
 
-| Framework | Environment | Local default | Container value |
-|---|---|---|---|
-| Hugging Face Hub / RF-DETR | `HF_HOME` | `~/.cache/huggingface` | `/app/.cache/huggingface` |
-| Paddle engine | `PADDLE_HOME` | `~/.cache/paddle` | `/app/.cache/paddle` |
-| PaddleX/PaddleOCR official models | `PADDLE_PDX_CACHE_HOME` | `~/.paddlex` | `/app/.cache/paddlex` |
+```env
+WIKI_HAMI_MINIO_ENABLED=true
+WIKI_HAMI_MINIO_ENDPOINT=minio:9000
+WIKI_HAMI_MINIO_PUBLIC_BASE_URL=http://192.168.x.x:9002
+WIKI_HAMI_MINIO_ACCESS_KEY=<secret>
+WIKI_HAMI_MINIO_SECRET_KEY=<secret>
+WIKI_HAMI_MINIO_SECURE=false
+WIKI_HAMI_MINIO_BUCKET=wiki-documents
+```
 
-`PADDLE_PDX_MODEL_SOURCE=HUGGINGFACE` selects the preferred PaddleX source. `WIKI_HAMI_STAMP_SIGNATURE_CACHE_DIR`, when set, overrides `HF_HOME` only for the RF-DETR checkpoint download.
+If Wiki Hami is not on the MinIO Docker network, set `MINIO_ENDPOINT` to whatever host/port is reachable from the Wiki Hami container. Do not assume that the backend-facing published port and the API-to-MinIO port are identical.
 
-Do not bake downloaded weights into Git. For offline deployment, populate the mounted caches ahead of time and keep their directory structure intact. There is no built-in warmup command; one successful real inference per module downloads and initializes its model. A subsequent process reuses disk weights but must reconstruct models in RAM.
+The public base URL is a validation policy for URLs sent by the backend. The API never treats those URLs as arbitrary HTTP download targets; object bytes are read via the configured MinIO client.
+
+Credentials belong in deployment secrets/GitLab `ENV_FILE`, never in source control.
 
 ## Docker image
 
-The default build installs CPU PaddlePaddle and all model extras:
+No special Dockerfile change is required for storage. The existing Dockerfile installs `requirements.txt` (directly or through `requirements-models.txt`), so the MinIO SDK is included automatically.
 
 ```bash
 docker build -t wiki-hami-extraction:0.2.0 .
 ```
 
-For a lightweight mock-only image:
+The image continues to expose 8000/8501 and uses `/api/v1/health` for liveness. Liveness does not load models or contact MinIO. Use `/api/v1/storage/minio/health` when storage connectivity must be checked explicitly.
 
-```bash
-docker build --build-arg INSTALL_MODELS=false -t wiki-hami-extraction:mock .
-```
+## Compose
 
-The image exposes ports 8000 and 8501, runs the API by default, and checks `/api/v1/health`. Health is a liveness/config endpoint, not a model-readiness check.
+Both `compose.yaml` and `deployment/compose.prod.yaml` already use `env_file: .env`/`../.env`; therefore the new `WIKI_HAMI_MINIO_*` settings are injected without structural Compose changes.
 
-## Local Compose
-
-```bash
-docker compose up -d --build
-docker compose logs -f api ui
-```
-
-Services:
-
-- API: `http://localhost:8000`, OpenAPI UI at `/docs`;
-- Streamlit: `http://localhost:8501`;
-- named cache volume: `wiki_hami_model_cache` mounted at `/app/.cache`;
-- output bind mount: `./data/outputs:/app/data/outputs` (reserved; current API/UI do not persist runs there).
-
-Use `docker compose down` without `-v` to preserve the named model cache. Removing the volume deletes cached weights and forces downloads on the next real inference.
-
-## Production-style Compose
+Production-style startup remains:
 
 ```bash
 mkdir -p /var/lib/wiki-hami/cache /var/lib/wiki-hami/outputs
-WIKI_HAMI_DATA_ROOT=/var/lib/wiki-hami \
-  docker compose -f deployment/compose.prod.yaml up -d
+docker compose -f deployment/compose.prod.yaml up -d
 ```
 
-The production file uses one Uvicorn worker and bind-mounts cache/output roots. Keep a single worker while models live in-process: every additional process loads another PaddleOCR, PP-DocLayout, and RF-DETR model set. Scale only after measuring RAM/VRAM and deciding whether model services should be separated.
+Model cache paths remain persistent:
 
-Ensure the container user can write the mounted cache. Persist and back up only project-owned artifacts as required; framework caches are reproducible and can normally be repopulated.
+- Hugging Face/RF-DETR: `HF_HOME`;
+- Paddle runtime: `PADDLE_HOME`;
+- PaddleX official models: `PADDLE_PDX_CACHE_HOME`.
 
-## First-run and restart behavior
+MinIO document images remain in object storage and are read per request; they are not copied into those framework caches.
 
-1. Container starts without loading models.
-2. `/health` can become healthy before weights are present.
-3. First request to a real backend acquires its initialization lock, downloads missing weights, and initializes the model.
-4. Concurrent calls to the same still-loading backend wait on that lock.
-5. Later requests reuse the in-memory model.
-6. After container restart, disk weights remain on the volume and the model is reconstructed without downloading them again.
+## Production versus local storage browser
 
-For controlled rollout, send a small representative request to `/ocr`, `/figure-table`, and `/stamp-signature` before routing user traffic. A network-free readiness guarantee would require a future explicit warmup/readiness mechanism.
+The product backend needs only the three module endpoints. The Streamlit inspector additionally uses MinIO health/list/object-proxy routes for browsing and preview.
 
-## Operational limits and timeouts
+Set:
 
-Default per-image maximum is 25 MiB and 50 million pixels; `/extract` accepts at most 100 pages. Up to four page jobs are admitted, but each model instance serializes its own predictions. The 180-second module timeout bounds how long orchestration waits; it cannot forcibly terminate synchronous inference already running in a worker thread.
+```env
+WIKI_HAMI_MINIO_BROWSER_ENABLED=false
+```
 
-Reverse proxies should set multipart/body/time limits appropriate to the maximum document size. The application does not currently authenticate, rate-limit, persist results, or impose a whole-request byte ceiling.
+when those internal inspection endpoints should not be available in a production environment. If Streamlit is intentionally deployed as an internal engineering console, the flag may remain enabled behind the appropriate network/access controls.
 
-## Outputs
+## First run
 
-The API returns JSON only and writes no extraction files. Streamlit retains the current run in session memory and offers:
+1. API starts without loading model weights.
+2. `/api/v1/health` can become healthy immediately.
+3. MinIO-backed requests first acquire the image object, validate/decode it, then initialize the selected model if needed.
+4. First real model inference downloads missing weights into the persistent framework cache.
+5. Later requests reuse both on-disk weights and the in-memory model instance.
+6. Container restart reconstructs models from the persistent cache; MinIO source objects remain external.
 
-- complete canonical `extraction.json`;
-- a ZIP with canonical JSON, `manifest.json`, and one annotated PNG per page.
+## Operational notes
 
-These are evaluation/debug exports, not a persistent storage subsystem.
+Per-image storage objects are bounded by the same `max_upload_bytes` limit before full object read. Pillow still enforces decode/pixel validation after acquisition. The public URL host/port and bucket are restricted by configuration, preventing arbitrary URL fetching.
+
+The API currently does not provide end-user authentication/rate limiting itself. Keep product and dev-storage endpoints behind the deployment network/API gateway appropriate to your environment.

@@ -49,3 +49,12 @@ def test_build_public_url_uses_configured_external_base():
     assert service.build_public_url("docs/a/page 01.jpg") == (
         "http://storage.example:9002/wiki-documents/docs/a/page%2001.jpg"
     )
+
+
+def test_presigned_query_is_not_retained_in_source_provenance():
+    service = MinioStorageService(settings())
+    ref = service.parse_image_url(
+        "http://storage.example:9002/wiki-documents/docs/a/page.jpg?X-Amz-Signature=secret"
+    )
+    assert ref.source_url == "http://storage.example:9002/wiki-documents/docs/a/page.jpg"
+    assert "secret" not in ref.source_url

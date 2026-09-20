@@ -132,7 +132,10 @@ class MinioStorageService:
             )
         if any(segment in {".", ".."} for segment in object_key.split("/")):
             raise MinioUrlError("image_url contains an invalid object path segment")
-        return MinioObjectRef(bucket=bucket, object_key=object_key, source_url=image_url)
+        # Rebuild a canonical URL without a query string so presigned tokens or
+        # other transient credentials can never leak into response provenance.
+        canonical_url = self.build_public_url(object_key)
+        return MinioObjectRef(bucket=bucket, object_key=object_key, source_url=canonical_url)
 
     def build_public_url(self, object_key: str) -> str:
         key = object_key.lstrip("/")
@@ -175,7 +178,7 @@ class MinioStorageService:
 
     def fetch_url(self, image_url: str) -> MinioObjectData:
         ref = self.parse_image_url(image_url)
-        return self.fetch_object(ref.object_key, source_url=image_url)
+        return self.fetch_object(ref.object_key, source_url=ref.source_url)
 
     def fetch_object(self, object_key: str, *, source_url: str | None = None) -> MinioObjectData:
         self._require_enabled()
