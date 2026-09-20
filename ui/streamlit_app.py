@@ -2,7 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+from pathlib import Path
 from typing import Any
+
+# Streamlit executes this file as a script. In container/Compose launches the script
+# directory (/app/ui) can be on sys.path without the repository root (/app), which
+# breaks absolute imports such as ``from ui.artifacts ...``. Make the repo root
+# importable here so the UI works both with ``python run.py --web`` and the DevOps
+# ``streamlit run ui/streamlit_app.py`` command without changing deployment config.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import requests
 import streamlit as st
