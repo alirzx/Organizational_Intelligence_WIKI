@@ -1,100 +1,98 @@
 # Wiki Hami — Extraction V1
 
-Wiki Hami Extraction V1 turns one or more page images from a logical document into canonical OCR paragraph, figure, table, stamp, and signature detections.
+Wiki Hami Extraction V1 converts document page images into canonical OCR paragraph, figure, table, stamp and signature detections. This repository is Step 1 only; template generation, document linking and later semantic/wiki stages are outside its scope.
 
-This repository is strictly Step 1: Detection & Extraction. Make Template, Doc Linking, RAG/semantic/LLM mapping, table-cell extraction, signature identity, stamp interpretation, and wiki generation are not implemented here.
+## Current architecture
 
-## Architecture
+Production images live in MinIO. The product backend sends an object URL to one of the three independent model APIs; Wiki Hami validates the configured MinIO host/bucket, obtains the object through its own authenticated MinIO client, performs shared preprocessing, then runs the selected CPU model.
 
 ```text
-Document (1..N images)
-  -> validate + EXIF orientation + RGB + bounded resize once per page
-  -> OCR + Figure/Table + Stamp/Signature
-  -> model-output adapters + restoration to source-image coordinates
-  -> page aggregation
-  -> pages[] + flattened document objects[] + counts/status/provenance
+Product backend -> MinIO URL -> authenticated object acquisition -> prepare page
+                                                            |
+                              +-----------------------------+-----------------------------+
+                              |                             |                             |
+                           OCR API                    Figure/Table API             Stamp/Signature API
+                              |                             |                             |
+                           PaddleOCR                   PP-DocLayoutV3                   RF-DETR
 ```
 
-Every canonical object repeats `document_id`, `page_id`, and `page_number`. Public geometry is always in `exif_corrected_source_pixels`, not model-resized coordinates. See [architecture](docs/architecture.md) and [workflows](docs/workflows.md).
+Local development supports both uploaded images and MinIO objects. `/extract` is the existing upload-based full workflow; `/extract/minio` runs all three pipelines over MinIO pages. Both reuse the same preprocessing, model services and canonical output contract.
+
+See [architecture](docs/architecture.md), [workflows](docs/workflows.md) and [MinIO integration](docs/minio.md).
 
 ## APIs
 
-Production/backend integrations use the independent module APIs:
+Product/backend:
 
-- `POST /api/v1/ocr`
-- `POST /api/v1/figure-table`
-- `POST /api/v1/stamp-signature`
+- `POST /api/v1/ocr` — JSON + one MinIO `image_url`
+- `POST /api/v1/figure-table` — JSON + one MinIO `image_url`
+- `POST /api/v1/stamp-signature` — JSON + one MinIO `image_url`
 
-The local Streamlit inspector, E2E tests, demos, and evaluation use `POST /api/v1/extract` for the complete multi-page workflow. It calls shared Python services inside the FastAPI process; it does not make loopback HTTP calls and does not replace the independent production APIs.
+Local/E2E:
 
-Process/config health is `GET /api/v1/health`. Full multipart fields, responses, schemas, status behavior, and curl examples are in the [API reference](docs/api.md).
+- `POST /api/v1/extract` — multipart uploaded pages
+- `POST /api/v1/extract/minio` — JSON with one or more MinIO page URLs
+
+Storage inspection for the local UI:
+
+- `GET /api/v1/storage/minio/health`
+- `GET /api/v1/storage/minio/objects`
+- `GET /api/v1/storage/minio/object`
+
+Swagger/OpenAPI is at `/docs`. Exact contracts and examples are in [docs/api.md](docs/api.md).
 
 ## Baseline models
 
-| Module | Baseline | Default device | Canonical output |
+| Module | Model | Device | Canonical output |
 |---|---|---|---|
-| OCR | PaddleOCR: `PP-OCRv5_server_det` + `arabic_PP-OCRv5_mobile_rec` | CPU | `paragraph` |
+| OCR | `PP-OCRv5_server_det` + `arabic_PP-OCRv5_mobile_rec` | CPU | `paragraph` |
 | Figure/Table | `PaddlePaddle/PP-DocLayoutV3` | CPU | `figure`, `table` |
 | Stamp/Signature | `bluecopa/rf-detr-stamp-signature-detector` | CPU | `stamp`, `signature` |
 
-The RF-DETR checkpoint also predicts checked/unchecked checkboxes; V1 filters them. A CUDA-capable Torch installation does not force RF-DETR onto GPU—the `WIKI_HAMI_STAMP_SIGNATURE_DEVICE` setting controls it. See [models and cache audit](docs/models.md).
+MinIO integration does not change model/device configuration.
 
 ## Repository structure
 
 ```text
-run.py               Unified local API/Streamlit launcher
-app/api/             FastAPI routes and multipart parsing
-app/core/            settings and process-local service registry
-app/preprocessing/   validation, image normalization, geometry transforms
-app/modules/         OCR, layout, and RF-DETR backends/services/adapters
-app/orchestration/   multi-module/page execution and aggregation
-app/schemas/         canonical Pydantic contracts
-ui/                  Streamlit inspector, visualizer, JSON/ZIP artifacts
-tests/               unit and API contract tests
+run.py               unified local launcher
+app/api/             FastAPI routes and request contracts
+app/storage/         MinIO URL validation and authenticated object acquisition
+app/core/            environment settings and process-local service registry
+app/preprocessing/   validation, decode, EXIF/RGB/resize and geometry transforms
+app/modules/         OCR, layout and RF-DETR backends/services/adapters
+app/orchestration/   multi-page/all-model execution and aggregation
+app/schemas/         public Pydantic contracts
+ui/                  Streamlit engineering inspector and exports
+tests/               unit/integration contracts
 deployment/          production-style Compose baseline
-docs/                engineering and integration documentation
-models/              policy/placeholder; downloaded weights are not committed
+docs/                architecture, API, storage and deployment documentation
 ```
-
-`configs/` and `data/` are currently placeholders. The API does not persist results; the UI creates downloadable artifacts in memory.
 
 ## Python 3.11 setup
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
+python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements-dev.txt
 cp .env.example .env
 ```
 
-Requirements are split by purpose:
-
-- `requirements.txt`: FastAPI, image processing, Streamlit/client runtime;
-- `requirements-dev.txt`: base dependencies plus tests;
-- `requirements-models.txt`: PaddleOCR, RF-DETR, and Hugging Face adapters;
-- `requirements-paddle-cpu.txt`: tested CPU PaddlePaddle version;
-- `requirements-torch-cpu.txt`: tested CPU PyTorch/TorchVision versions used by RF-DETR.
-
-Install real CPU model runtimes in this order so dependency resolution does not replace CPU PyTorch with CUDA wheels:
+For real CPU models install in this order:
 
 ```bash
 python -m pip install -r requirements-paddle-cpu.txt \
   -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-
 python -m pip install -r requirements-torch-cpu.txt \
   --index-url https://download.pytorch.org/whl/cpu
-
 python -m pip install -r requirements-models.txt
 ```
 
-## Environment and mock/real backends
+## Environment
 
-Settings load from `.env` and environment variables. `.env.example` documents request limits, concurrency, thresholds, devices, model IDs, and caches. It defaults to mock backends so API/UI development and tests start without heavyweight downloads.
+Real model selection:
 
-For real inference set:
-
-```text
+```env
 WIKI_HAMI_OCR_BACKEND=paddle
 WIKI_HAMI_OCR_DEVICE=cpu
 WIKI_HAMI_FIGURE_TABLE_BACKEND=pp_doclayout
@@ -103,89 +101,68 @@ WIKI_HAMI_STAMP_SIGNATURE_BACKEND=rfdetr
 WIKI_HAMI_STAMP_SIGNATURE_DEVICE=cpu
 ```
 
-Mocks exercise the canonical pipeline but do not represent model quality.
+MinIO settings:
+
+```env
+WIKI_HAMI_MINIO_ENABLED=true
+WIKI_HAMI_MINIO_ENDPOINT=minio:9000
+WIKI_HAMI_MINIO_PUBLIC_BASE_URL=http://<external-minio-host>:<exposed-port>
+WIKI_HAMI_MINIO_ACCESS_KEY=<secret>
+WIKI_HAMI_MINIO_SECRET_KEY=<secret>
+WIKI_HAMI_MINIO_SECURE=false
+WIKI_HAMI_MINIO_BUCKET=wiki-documents
+```
+
+`MINIO_ENDPOINT` is Wiki Hami's connection address. `MINIO_PUBLIC_BASE_URL` is the host/port appearing in URLs sent by the backend. They can differ, for example Docker `minio:9000` internally versus host port `9002` externally. Never commit real credentials. See [docs/minio.md](docs/minio.md).
 
 ## Run locally
 
-Activate the project environment first:
-
 ```bash
 source .venv/bin/activate
-```
-
-Run the FastAPI service in one terminal:
-
-```bash
 python run.py --api
 ```
 
-For development auto-reload:
-
-```bash
-python run.py --api --reload
-```
-
-Defaults:
-
-- API root: `http://localhost:8000`
-- OpenAPI: `http://localhost:8000/docs`
-- health: `http://localhost:8000/api/v1/health`
-
-Keep the API running, then start the Streamlit inspector in another terminal:
+Second terminal:
 
 ```bash
 source .venv/bin/activate
 python run.py --web
 ```
 
-Default Streamlit URL: `http://localhost:8501`.
+- API: `http://localhost:8000`
+- Swagger: `http://localhost:8000/docs`
+- UI: `http://localhost:8501`
 
-`run.py` launches both services through the active Python interpreter, changes execution to the repository root, and ensures the repository is on `PYTHONPATH`. This prevents package-import failures such as `No module named 'ui'` when starting Streamlit.
-
-Optional overrides are available for both services:
-
-```bash
-python run.py --api --host 0.0.0.0 --port 8000
-python run.py --web --host 0.0.0.0 --port 8501
-```
-
-The inspector uploads one or many pages to `/extract`, shows document/page status and latency, original and annotated pages, a fixed class legend, OCR paragraphs, page/transform metadata, and canonical JSON. It can download complete JSON or a ZIP containing JSON, a manifest, and all annotated PNGs. Annotations use canonical source coordinates and EXIF-corrected images.
+The Streamlit inspector provides Local Upload and MinIO input modes, MinIO health/object browsing and preview, full extraction, source/annotated overlays, pipeline status, ordered detections, OCR/layout/mark views, page/document JSON and downloadable JSON/ZIP artifacts.
 
 ## Model caching
 
-First real inference downloads missing weights; later starts reuse disk caches, and later requests reuse in-memory model instances. Local defaults are:
+First real inference downloads missing model weights. Framework caches are persisted by Compose and later requests reuse in-memory model instances. MinIO objects are read from object storage per request; they are not copied into the model-cache directories.
 
-- PaddleX official models: `~/.paddlex/official_models` (`PADDLE_PDX_CACHE_HOME`);
-- Paddle runtime: `~/.cache/paddle` (`PADDLE_HOME`);
-- Hugging Face/RF-DETR: `~/.cache/huggingface` (`HF_HOME`).
+## Docker / deployment
 
-`models/` stays empty because frameworks own these caches. Docker/Compose maps all three to persistent storage; weights are not committed. See [deployment](docs/deployment.md).
-
-## Docker Compose
+The existing Dockerfile automatically installs the MinIO SDK through `requirements.txt`; no model image/device changes are required. Both Compose files already load `.env`, so MinIO configuration is injected the same way as the existing model settings.
 
 ```bash
 docker compose up -d --build
 ```
 
-- FastAPI: `http://localhost:8000`
-- Streamlit: `http://localhost:8501`
-
-The default Docker build installs explicit CPU PaddlePaddle and CPU PyTorch/TorchVision before the model extras. The configured `.env` still selects mock or real backends. Local Compose uses one named persistent cache volume and one API worker to avoid duplicating model memory.
+Production should keep one Uvicorn worker while models are process-local. Disable `WIKI_HAMI_MINIO_BROWSER_ENABLED` when the Streamlit storage browser/proxy is not required. See [deployment](docs/deployment.md).
 
 ## Tests
 
 ```bash
-source .venv/bin/activate
 pytest -q
 ```
 
-Tests force mock backends and never download weights. They cover module/API contracts, multi-page aggregation and provenance, corrupt-page rejection, partial module success, service reuse, bbox/polygon coordinate round trips, model adapters, OCR grouping, stable visualization colors, multi-module annotation, canonical JSON, and multi-page ZIP export.
+Tests keep real models/network disabled through mocks and cover product URL contracts, MinIO URL validation, uploaded and MinIO full extraction, canonical provenance, orchestration, transforms, adapters and UI helpers.
 
 ## Documentation
 
-- [Contract notes](docs/contracts.md)
+- [API reference](docs/api.md)
+- [MinIO integration](docs/minio.md)
 - [Architecture](docs/architecture.md)
-- [Workflows and preprocessing](docs/workflows.md)
-- [API integration reference and canonical schemas](docs/api.md)
-- [Models and cache audit](docs/models.md)
+- [Workflows](docs/workflows.md)
+- [Models](docs/models.md)
 - [Deployment](docs/deployment.md)
+- [Contract notes](docs/contracts.md)
