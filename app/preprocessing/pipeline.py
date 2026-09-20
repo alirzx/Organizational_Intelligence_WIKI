@@ -1,10 +1,11 @@
 import io
+
 from PIL import Image, ImageOps
 
 from app.core.config import Settings
 from app.preprocessing.types import PreparedPage
 from app.preprocessing.validator import validate_image_bytes
-from app.schemas.image import ImageMetadata, TransformMetadata
+from app.schemas.image import ImageMetadata, ImageSourceMetadata, TransformMetadata
 
 
 def _resize_for_models(image: Image.Image, max_long_edge: int) -> Image.Image:
@@ -28,6 +29,7 @@ def prepare_page(
     page_number: int,
     page_metadata: dict,
     settings: Settings,
+    source: ImageSourceMetadata | None = None,
 ) -> PreparedPage:
     validate_image_bytes(data, settings)
 
@@ -35,10 +37,10 @@ def prepare_page(
         exif = opened.getexif()
         original_orientation = exif.get(274, 1) if exif else 1
         oriented = ImageOps.exif_transpose(opened)
-        source = oriented.convert("RGB")
+        source_image = oriented.convert("RGB")
 
-    processed = _resize_for_models(source, settings.preprocess_max_long_edge)
-    source_width, source_height = source.size
+    processed = _resize_for_models(source_image, settings.preprocess_max_long_edge)
+    source_width, source_height = source_image.size
     processed_width, processed_height = processed.size
 
     transform = TransformMetadata(
@@ -57,6 +59,7 @@ def prepare_page(
         source_height=source_height,
         processed_width=processed_width,
         processed_height=processed_height,
+        source=source,
     )
 
     return PreparedPage(
@@ -64,7 +67,7 @@ def prepare_page(
         page_id=page_id,
         page_number=page_number,
         page_metadata=page_metadata,
-        source_image=source,
+        source_image=source_image,
         processed_image=processed,
         image_metadata=image_metadata,
         transform=transform,

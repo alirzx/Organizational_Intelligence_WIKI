@@ -4,7 +4,9 @@ from io import BytesIO
 import httpx
 from PIL import Image
 
+from app.core.runtime import get_minio_storage_service
 from app.main import app
+from app.storage.minio_service import MinioObjectData, MinioObjectRef
 
 
 def image_bytes(size=(1200, 1800)):
@@ -21,31 +23,57 @@ def api_client():
     )
 
 
+def mock_minio(monkeypatch):
+    storage = get_minio_storage_service()
+
+    def fetch_url(url: str):
+        ref = storage.parse_image_url(url)
+        return MinioObjectData(
+            ref=ref,
+            data=image_bytes(),
+            filename=ref.object_key.rsplit("/", 1)[-1],
+            content_type="image/png",
+            etag="etag-test",
+            size=len(image_bytes()),
+            last_modified=None,
+        )
+
+    monkeypatch.setattr(storage, "fetch_url", fetch_url)
+    return storage
+
+
 async def test_health():
     async with api_client() as client:
         response = await client.get("/api/v1/health")
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
+        assert response.json()["storage"]["minio"]["bucket"] == "wiki-documents"
 
 
-async def test_each_module_endpoint_contract():
+async def test_each_product_module_endpoint_accepts_minio_url(monkeypatch):
+    mock_minio(monkeypatch)
     async with api_client() as client:
         endpoints = ["ocr", "figure-table", "stamp-signature"]
         for endpoint in endpoints:
             response = await client.post(
                 f"/api/v1/{endpoint}",
-                files={"image": ("page.png", image_bytes(), "image/png")},
-                data={"document_id": "doc_contract", "page_number": "1"},
+                json={
+                    "document_id": "doc_contract",
+                    "page_number": 1,
+                    "image_url": "http://minio.test:9000/wiki-documents/doc_contract/page.png",
+                },
             )
             assert response.status_code == 200, response.text
             body = response.json()
             assert body["document_id"] == "doc_contract"
             assert body["page_id"] == "doc_contract:p1"
             assert body["status"]["state"] == "success"
+            assert body["image"]["source"]["type"] == "minio"
+            assert body["image"]["source"]["object_key"] == "doc_contract/page.png"
             assert isinstance(body["objects"], list)
 
 
-async def test_document_extract_merges_multiple_pages_and_keeps_page_provenance():
+async def test_document_extract_merges_multiple_uploaded_pages_and_keeps_page_provenance():
     files = [
         ("images", ("p1.png", image_bytes(), "image/png")),
         ("images", ("p2.png", image_bytes((1000, 1400)), "image/png")),
@@ -70,6 +98,7 @@ async def test_document_extract_merges_multiple_pages_and_keeps_page_provenance(
     assert body["document_id"] == "doc_42"
     assert body["page_count"] == 2
     assert len(body["pages"]) == 2
+    assert body["pages"][0]["image"]["source"]["type"] == "upload"
     assert len(body["objects"]) == sum(len(page["objects"]) for page in body["pages"])
     assert {obj["page_number"] for obj in body["objects"]} == {1, 2}
     assert {obj["page_id"] for obj in body["objects"]} == {"doc_42:scan_001", "doc_42:scan_002"}
@@ -81,6 +110,40 @@ async def test_document_extract_merges_multiple_pages_and_keeps_page_provenance(
         "signature": 2,
     }
     assert body["processing"]["state"] == "success"
+
+
+async def test_minio_document_extract_runs_all_three_models(monkeypatch):
+    mock_minio(monkeypatch)
+    async with api_client() as client:
+        response = await client.post(
+            "/api/v1/extract/minio",
+            json={
+                "document_id": "doc_minio",
+                "document_metadata": {"source": "minio"},
+                "pages": [
+                    {
+                        "image_url": "http://minio.test:9000/wiki-documents/doc_minio/p1.png",
+                        "page_number": 1,
+                    },
+                    {
+                        "image_url": "http://minio.test:9000/wiki-documents/doc_minio/p2.png",
+                        "page_number": 2,
+                    },
+                ],
+            },
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["page_count"] == 2
+    assert body["processing"]["state"] == "success"
+    assert all(page["image"]["source"]["type"] == "minio" for page in body["pages"])
+    assert body["object_counts"] == {
+        "paragraph": 2,
+        "table": 2,
+        "figure": 2,
+        "stamp": 2,
+        "signature": 2,
+    }
 
 
 async def test_invalid_page_rejects_document_before_module_execution():

@@ -11,6 +11,7 @@ dependencies = [
   "python-multipart>=0.0.9,<1",
   "pillow>=10.4,<12",
   "numpy>=1.26,<3",
+  "minio>=7.2,<8",
 ]
 
 [project.optional-dependencies]

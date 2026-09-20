@@ -7,3 +7,4 @@ pillow>=10.4,<12
 numpy>=1.26,<3
 streamlit>=1.38,<2
 requests>=2.32,<3
+minio>=7.2,<8

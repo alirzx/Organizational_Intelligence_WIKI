@@ -1,36 +1,48 @@
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter
 
-from app.api.v1.request_parsing import parse_json_object, prepare_uploaded_page
+from app.api.v1.request_parsing import prepare_minio_page
 from app.core.config import get_settings
-from app.core.runtime import get_figure_table_service
+from app.core.runtime import get_figure_table_service, get_minio_storage_service
 from app.schemas.extraction import ModulePageResponse
 from app.schemas.image import PageDescriptor
+from app.schemas.storage import ModuleImageRequest
 from app.utils.ids import default_page_id, new_request_id
 
-router = APIRouter(tags=["figure-table"])
+router = APIRouter(tags=["Figure / Table"])
 settings = get_settings()
 service = get_figure_table_service()
+storage = get_minio_storage_service()
 
 
-@router.post("/figure-table", response_model=ModulePageResponse)
-async def run_figure_table(
-    image: UploadFile = File(...),
-    document_id: str = Form(...),
-    page_number: int = Form(1),
-    page_id: str | None = Form(None),
-    page_metadata_json: str | None = Form(None),
-):
+@router.post(
+    "/figure-table",
+    response_model=ModulePageResponse,
+    summary="Detect figures and tables for one MinIO image",
+    description=(
+        "Production layout endpoint. Send one backend-provided MinIO image URL. Wiki Hami "
+        "resolves the configured bucket/object through MinIO, applies the shared preprocessing "
+        "pipeline, runs PP-DocLayoutV3, and returns only canonical figure/table objects."
+    ),
+    responses={
+        404: {"description": "MinIO object not found"},
+        422: {"description": "Invalid MinIO URL, request, or image"},
+        502: {"description": "MinIO read/connectivity failure"},
+        503: {"description": "MinIO integration disabled or misconfigured"},
+    },
+)
+async def run_figure_table(payload: ModuleImageRequest):
     request_id = new_request_id()
     descriptor = PageDescriptor(
-        page_id=page_id or default_page_id(document_id, page_number),
-        page_number=page_number,
-        metadata=parse_json_object(page_metadata_json, "page_metadata_json"),
+        page_id=payload.page_id or default_page_id(payload.document_id, payload.page_number),
+        page_number=payload.page_number,
+        metadata=payload.page_metadata,
     )
-    page = await prepare_uploaded_page(
-        upload=image,
-        document_id=document_id,
+    page = await prepare_minio_page(
+        image_url=payload.image_url,
+        document_id=payload.document_id,
         descriptor=descriptor,
-        fallback_page_number=page_number,
+        fallback_page_number=payload.page_number,
         settings=settings,
+        storage=storage,
     )
     return await service.run(page, request_id)

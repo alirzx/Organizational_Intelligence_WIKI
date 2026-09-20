@@ -1,4 +1,4 @@
-"""Process-local service registry for reusable model backends."""
+"""Process-local service registry for reusable model and storage backends."""
 
 from functools import lru_cache
 
@@ -7,6 +7,7 @@ from app.modules.figure_table.service import FigureTableService
 from app.modules.ocr.service import OCRService
 from app.modules.stamp_signature.service import StampSignatureService
 from app.orchestration.extractor import ExtractionOrchestrator
+from app.storage.minio_service import MinioStorageService
 
 
 @lru_cache
@@ -22,6 +23,11 @@ def get_figure_table_service() -> FigureTableService:
 @lru_cache
 def get_stamp_signature_service() -> StampSignatureService:
     return StampSignatureService(get_settings())
+
+
+@lru_cache
+def get_minio_storage_service() -> MinioStorageService:
+    return MinioStorageService(get_settings())
 
 
 @lru_cache
