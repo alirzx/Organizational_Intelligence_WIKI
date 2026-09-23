@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from io import BytesIO
 
 from PIL import Image
@@ -54,10 +55,10 @@ class ArtifactPublisher:
     @staticmethod
     def _crop_png(source: Image.Image, obj: DetectedObject) -> bytes:
         width, height = source.size
-        left = max(0, min(width, int(obj.bbox.x1)))
-        top = max(0, min(height, int(obj.bbox.y1)))
-        right = max(left + 1, min(width, int(round(obj.bbox.x2))))
-        bottom = max(top + 1, min(height, int(round(obj.bbox.y2))))
+        left = max(0, min(width - 1, math.floor(obj.bbox.x1)))
+        top = max(0, min(height - 1, math.floor(obj.bbox.y1)))
+        right = max(left + 1, min(width, math.ceil(obj.bbox.x2)))
+        bottom = max(top + 1, min(height, math.ceil(obj.bbox.y2)))
         crop = source.crop((left, top, right, bottom))
         buffer = BytesIO()
         crop.save(buffer, format="PNG")
