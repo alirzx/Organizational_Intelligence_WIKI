@@ -142,6 +142,7 @@ async def extract_document(
 @router.post(
     "/extract/minio",
     response_model=ExtractionJobResponse,
+    response_model_exclude_none=True,
     summary="Process one MinIO-backed document and persist AI artifacts",
     description=(
         "Primary Backend → AI production workflow. The backend sends the document identifier "
@@ -181,7 +182,14 @@ async def extract_minio_document(payload: MinioDocumentRequest):
     try:
         await asyncio.to_thread(publisher.publish, run)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return JSONResponse(
+            status_code=422,
+            content={
+                "document_id": payload.document_id,
+                "status": "failed",
+                "error": str(exc),
+            },
+        )
     except MinioStorageError as exc:
         return JSONResponse(
             status_code=502,
