@@ -6,7 +6,7 @@ from PIL import Image
 
 from app.core.runtime import get_artifact_publisher, get_minio_storage_service
 from app.main import app
-from app.storage.minio_service import MinioObjectData, MinioObjectRef
+from app.storage.minio_service import MinioObjectData, MinioStorageError
 
 
 def image_bytes(size=(1200, 1800)):
@@ -41,6 +41,20 @@ def mock_minio(monkeypatch):
 
     monkeypatch.setattr(storage, "fetch_url", fetch_url)
     return storage
+
+
+def minio_payload(document_id="123"):
+    return {
+        "document_id": document_id,
+        "document_metadata": {"source": "minio"},
+        "pages": [
+            {
+                "image_url": f"http://minio.test:9000/media/documents/{document_id}/images/page-001.jpg",
+                "page_number": 1,
+                "page_id": f"{document_id}:p1",
+            }
+        ],
+    }
 
 
 async def test_health():
@@ -113,6 +127,23 @@ async def test_document_extract_merges_multiple_uploaded_pages_and_keeps_page_pr
     assert body["processing"]["state"] == "success"
 
 
+async def test_local_upload_can_optionally_publish_without_losing_detailed_response(monkeypatch):
+    published = []
+    publisher = get_artifact_publisher()
+    monkeypatch.setattr(publisher, "publish", lambda run: published.append(run.response.document_id) or [])
+
+    async with api_client() as client:
+        response = await client.post(
+            "/api/v1/extract",
+            files=[("images", ("page.png", image_bytes(), "image/png"))],
+            data={"document_id": "local_publish", "persist_outputs": "true"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["processing"]["state"] == "success"
+    assert published == ["local_publish"]
+
+
 async def test_minio_inspection_endpoint_runs_all_three_models(monkeypatch):
     mock_minio(monkeypatch)
     async with api_client() as client:
@@ -147,7 +178,7 @@ async def test_minio_inspection_endpoint_runs_all_three_models(monkeypatch):
     }
 
 
-async def test_product_minio_endpoint_persists_then_returns_small_status(monkeypatch):
+async def test_minio_inspection_can_publish_in_same_inference_pass(monkeypatch):
     mock_minio(monkeypatch)
     published = []
     publisher = get_artifact_publisher()
@@ -155,23 +186,47 @@ async def test_product_minio_endpoint_persists_then_returns_small_status(monkeyp
 
     async with api_client() as client:
         response = await client.post(
-            "/api/v1/extract/minio",
-            json={
-                "document_id": "123",
-                "document_metadata": {"source": "minio"},
-                "pages": [
-                    {
-                        "image_url": "http://minio.test:9000/media/documents/123/images/page-001.jpg",
-                        "page_number": 1,
-                        "page_id": "123:p1",
-                    }
-                ],
-            },
+            "/api/v1/extract/minio/inspect?persist_outputs=true",
+            json=minio_payload("inspect_publish"),
         )
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"document_id": "123", "status": "success", "error": None}
+    assert response.json()["processing"]["state"] == "success"
+    assert published == ["inspect_publish"]
+
+
+async def test_product_minio_endpoint_persists_then_returns_small_status(monkeypatch):
+    mock_minio(monkeypatch)
+    published = []
+    publisher = get_artifact_publisher()
+    monkeypatch.setattr(publisher, "publish", lambda run: published.append(run.response.document_id) or [])
+
+    async with api_client() as client:
+        response = await client.post("/api/v1/extract/minio", json=minio_payload())
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"document_id": "123", "status": "success"}
     assert published == ["123"]
+
+
+async def test_product_minio_endpoint_returns_502_when_artifact_write_fails(monkeypatch):
+    mock_minio(monkeypatch)
+    publisher = get_artifact_publisher()
+
+    def fail_publish(run):
+        raise MinioStorageError("write denied")
+
+    monkeypatch.setattr(publisher, "publish", fail_publish)
+
+    async with api_client() as client:
+        response = await client.post("/api/v1/extract/minio", json=minio_payload("write_fail"))
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "document_id": "write_fail",
+        "status": "failed",
+        "error": "write denied",
+    }
 
 
 async def test_invalid_page_rejects_document_before_module_execution():
