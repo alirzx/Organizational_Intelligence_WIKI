@@ -1,6 +1,6 @@
 import asyncio
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.api.v1.request_parsing import (
@@ -68,6 +68,17 @@ def _processing_error(run) -> str:
     return "; ".join(failures) or f"document processing state={run.response.processing.state.value}"
 
 
+async def _publish_debug_run(run) -> None:
+    if run.response.processing.state != ProcessingState.SUCCESS:
+        raise HTTPException(status_code=500, detail=_processing_error(run))
+    try:
+        await asyncio.to_thread(publisher.publish, run)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except MinioStorageError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.post(
     "/extract",
     response_model=DocumentExtractionResponse,
@@ -75,8 +86,8 @@ def _processing_error(run) -> str:
     description=(
         "Local/development multipart workflow. Upload one or more page images and run OCR, "
         "figure/table, and stamp/signature pipelines through the same in-process orchestrator "
-        "used by the product workflow. Results are returned directly for inspection and are not "
-        "persisted to product MinIO paths."
+        "used by the product workflow. Set persist_outputs=true to also exercise the product "
+        "artifact publisher while retaining the detailed inspection response."
     ),
 )
 async def extract_document(
@@ -84,6 +95,7 @@ async def extract_document(
     document_id: str = Form(...),
     document_metadata_json: str | None = Form(None),
     pages_metadata_json: str | None = Form(None),
+    persist_outputs: bool = Form(False),
 ):
     if not images:
         raise HTTPException(status_code=422, detail="at least one image is required")
@@ -109,12 +121,22 @@ async def extract_document(
             )
         )
 
-    return await orchestrator.extract_document(
+    if not persist_outputs:
+        return await orchestrator.extract_document(
+            document_id=document_id,
+            pages=pages,
+            request_id=request_id,
+            document_metadata=document_metadata,
+        )
+
+    run = await orchestrator.extract_document_run(
         document_id=document_id,
         pages=pages,
         request_id=request_id,
         document_metadata=document_metadata,
     )
+    await _publish_debug_run(run)
+    return run.response
 
 
 @router.post(
@@ -179,15 +201,22 @@ async def extract_minio_document(payload: MinioDocumentRequest):
     summary="Run full MinIO extraction and return detailed results for local inspection",
     description=(
         "Engineering/Streamlit companion to the product endpoint. It uses the same MinIO "
-        "acquisition, preprocessing and model orchestration but returns the detailed canonical "
-        "document response and does not write product artifacts."
+        "acquisition, preprocessing and model orchestration and returns the detailed canonical "
+        "document response. Set persist_outputs=true to additionally publish the exact product "
+        "artifacts without a second inference pass."
     ),
 )
-async def inspect_minio_document(payload: MinioDocumentRequest):
+async def inspect_minio_document(
+    payload: MinioDocumentRequest,
+    persist_outputs: bool = Query(False),
+):
     pages = await _prepare_minio_pages(payload)
-    return await orchestrator.extract_document(
+    run = await orchestrator.extract_document_run(
         document_id=payload.document_id,
         pages=pages,
         request_id=new_request_id(),
         document_metadata=payload.document_metadata,
     )
+    if persist_outputs:
+        await _publish_debug_run(run)
+    return run.response
