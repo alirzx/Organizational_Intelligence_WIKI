@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 MODULE_REQUEST_EXAMPLE = {
     "document_id": "DOC-100",
-    "image_url": "http://minio.example:9000/wiki-documents/docs/DOC-100/page-001.jpg",
+    "image_url": "http://minio.example:9000/media/documents/DOC-100/images/page-001.jpg",
     "page_number": 1,
     "page_id": "DOC-100:p1",
     "page_metadata": {"source_asset_id": "asset_991"},
@@ -14,7 +14,7 @@ MODULE_REQUEST_EXAMPLE = {
 
 
 class ModuleImageRequest(BaseModel):
-    """Production request for one model pipeline using a MinIO object URL."""
+    """Engineering request for one model pipeline using a MinIO object URL."""
 
     model_config = ConfigDict(json_schema_extra={"examples": [MODULE_REQUEST_EXAMPLE]})
 
@@ -22,8 +22,8 @@ class ModuleImageRequest(BaseModel):
     image_url: str = Field(
         min_length=1,
         description=(
-            "MinIO/S3 object URL supplied by the backend. Its public host/port and bucket "
-            "must match the configured Wiki Hami MinIO policy."
+            "MinIO/S3 object URL supplied by the backend or engineering client. Its host/port "
+            "and bucket must match the configured Wiki Hami MinIO policy."
         ),
     )
     page_number: int = Field(default=1, ge=1)
@@ -47,18 +47,18 @@ class MinioDocumentRequest(BaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "document_id": "DOC-100",
+                    "document_id": "123",
                     "document_metadata": {"source": "minio"},
                     "pages": [
                         {
-                            "image_url": "http://minio.example:9000/wiki-documents/docs/DOC-100/page-001.jpg",
+                            "image_url": "http://minio:9000/media/documents/123/images/page-001.jpg",
                             "page_number": 1,
-                            "page_id": "DOC-100:p1",
+                            "page_id": "123:p1",
                         },
                         {
-                            "image_url": "http://minio.example:9000/wiki-documents/docs/DOC-100/page-002.jpg",
+                            "image_url": "http://minio:9000/media/documents/123/images/page-002.jpg",
                             "page_number": 2,
-                            "page_id": "DOC-100:p2",
+                            "page_id": "123:p2",
                         },
                     ],
                 }
@@ -69,6 +69,14 @@ class MinioDocumentRequest(BaseModel):
     document_id: str = Field(min_length=1)
     pages: list[MinioPageRequest] = Field(min_length=1)
     document_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExtractionJobResponse(BaseModel):
+    """Small Backend ↔ AI contract after artifacts are persisted in MinIO."""
+
+    document_id: str
+    status: Literal["success", "failed"]
+    error: str | None = None
 
 
 class MinioHealthResponse(BaseModel):
