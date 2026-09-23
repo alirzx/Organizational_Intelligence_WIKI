@@ -19,7 +19,11 @@ from app.schemas.extraction import DocumentExtractionResponse
 from app.schemas.image import PageDescriptor
 from app.schemas.status import ProcessingState
 from app.schemas.storage import ExtractionJobResponse, MinioDocumentRequest
-from app.storage.minio_service import MinioStorageError
+from app.storage.minio_service import (
+    MinioConfigurationError,
+    MinioStorageError,
+    MinioUrlError,
+)
 from app.utils.ids import new_request_id
 
 router = APIRouter(tags=["Full Extraction"])
@@ -36,8 +40,24 @@ async def _prepare_minio_pages(payload: MinioDocumentRequest):
             detail=f"document exceeds max_pages_per_document={settings.max_pages_per_document}",
         )
 
+    expected_prefix = f"documents/{payload.document_id}/images/"
     pages = []
     for index, item in enumerate(payload.pages, start=1):
+        try:
+            ref = storage.parse_image_url(item.image_url)
+        except MinioUrlError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except MinioConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if not ref.object_key.startswith(expected_prefix):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"page image must be under {expected_prefix!r}; "
+                    f"received object {ref.object_key!r}"
+                ),
+            )
+
         descriptor = PageDescriptor(
             page_id=item.page_id,
             page_number=item.page_number,
